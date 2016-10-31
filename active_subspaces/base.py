@@ -16,6 +16,8 @@ from subspaces import Subspaces
 from gradients import local_linear_gradients, finite_difference_gradients
 from domains import UnboundedActiveVariableDomain, BoundedActiveVariableDomain, \
                     UnboundedActiveVariableMap, BoundedActiveVariableMap
+
+from domains2 import BoxDomain, LinIneqDomain 
 import time
 
 class ActiveSubspaceReducedModel():
