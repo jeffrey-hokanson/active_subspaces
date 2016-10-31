@@ -51,7 +51,7 @@ class SimulationRunner():
 	function is a wrapper to a larger simulation code.
 	"""
 
-	def __init__(self, fun, backend = None, num_cores = None):
+	def __init__(self, fun, backend = None, num_cores = None, domain = None):
 		"""Initialize a SimulationRunner.
 
 		Parameters
@@ -95,6 +95,15 @@ class SimulationRunner():
 			self.run = self._run_multiprocessing
 		elif backend == 'celery':
 			self.run = self._run_celery
+
+
+		# Setup the domain options
+		self.domain = domain
+		if self.domain is None:
+			self.isinside = lambda x: True
+		else:
+			self.isinside = self.domain.isinside
+
 
 
 	def _format_output(self, output):
