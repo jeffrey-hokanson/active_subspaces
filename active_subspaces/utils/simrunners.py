@@ -5,6 +5,7 @@ import time
 from misc import process_inputs
 import warnings
 import itertools
+import functools
 # checking to see if system has multiprocessing
 try:
 	import multiprocessing as mp
@@ -15,11 +16,18 @@ except ImportError, e:
 
 try: 
 	from celery_runner import celery_runner
-	import marshal
+	#import marshal
+	import dill
 	HAS_CELERY = True
 except ImportError, e:
 	HAS_CELERY = False	
 
+try:
+	from progress import Bar
+	HAS_PROGRESS = True
+except:
+	HAS_PROGRESS = False
+					
 
 
 class SimulationRunner():
@@ -40,6 +48,20 @@ class SimulationRunner():
 		* celery - use the Celery distributed task queue to split up function
 			evaluations
 
+	domain : Domain
+		Specifies the domain of provided function, allowing to check that all
+		points that are to be run are inside the domain.
+
+	progress : {True, False}
+		If true, displays a progressbar showing how many simulations have been run
+
+	units : {'normalized', 'application'}
+		Specifies the units to be used when calling run
+
+	nproc : int
+		Number of processes to start when using multiprocessing. If negative,
+		use as many processes as tasks
+
 	See Also
 	--------
 	utils.simrunners.SimulationGradientRunner
@@ -51,7 +73,8 @@ class SimulationRunner():
 	function is a wrapper to a larger simulation code.
 	"""
 
-	def __init__(self, fun, backend = None, num_cores = None, domain = None):
+	def __init__(self, fun, backend = None, nproc = None, domain = None,
+		progress = False, units = 'application', args = None, kwargs = None):
 		"""Initialize a SimulationRunner.
 
 		Parameters
@@ -89,21 +112,36 @@ class SimulationRunner():
 		if backend == 'loop':
 			self.run = self._run_loop	
 		elif backend == 'multiprocessing':
-			if num_cores is None:
-				num_cores = mp.cpu_count() - 1
-			self.num_cores = num_cores
+			if nproc is None:
+				nproc = mp.cpu_count() - 1
+			self.nproc = nproc
 			self.run = self._run_multiprocessing
 		elif backend == 'celery':
 			self.run = self._run_celery
 
+		self.__call__ = self.run
 
 		# Setup the domain options
 		self.domain = domain
+	
+		self.progress = progress
+		self.units = units
 		if self.domain is None:
 			self.isinside = lambda x: True
 		else:
-			self.isinside = self.domain.isinside
+			if self.units == 'normalized':
+				self.isinside = lambda x: self.domain.isinside(self.domain.unnormalize(x).flatten())
+			else:
+				self.inside = self.domain.isinside
 
+
+		if args is None:
+			args = []
+		self.args = args
+
+		if kwargs is None:
+			kwargs = {}
+		self.kwargs = kwargs
 
 
 	def _format_output(self, output):
@@ -132,13 +170,15 @@ class SimulationRunner():
 		""" Runs a simple for-loop over the target function
 		"""
 		X, M, m = process_inputs(X)
+		if self.units == 'normalized':
+			X = self.domain.unnormalize(X)
 		# We store the output in a list so that we can handle failures of the function
 		# to evaluate
 		output = []
 		for i in range(M):
 			# Try to evaluate the function
 			try:
-				out = self.fun(X[i,:].reshape((1,m)))
+				out = self.fun(X[i,:].reshape((1,m)), *self.args, **self.kwargs)
 			except:
 				out = None
 			output.append(out)
@@ -146,9 +186,17 @@ class SimulationRunner():
 		return self._format_output(output)
 
 	def _run_multiprocessing(self, X):
-		pool = mp.Pool(processes = self.num_cores)
+		X, M, m = process_inputs(X)
+		if self.units == 'normalized':
+			X = self.domain.unnormalize(X)
+		
+		nproc = self.nproc
+		if nproc < 0:
+			nproc = len(X)
+		pool = mp.Pool(processes = nproc)
 		try:
 			if hasattr(self.fun, 'im_class'): 	# If the function is a member of a class
+				#TODO Implement kwarg caching for class functions
 				arg_list_objects = []
 				arg_list_inputs = []
 				for i in range(M):
@@ -160,7 +208,30 @@ class SimulationRunner():
 				target.__code__ = self.fun.im_func.__code__
 				output = pool.map(target_star, itertools.izip(arg_list_objects, arg_list_inputs))
 			else: 			# Just a plain function
-				output = pool.map(self.fun, X)
+				if len(self.args) > 0 and len(self.kwargs) > 0:
+					# Freeze the additional arguments to the function
+					# http://stackoverflow.com/a/39366868
+					fun = functools.partial(self.fun, *self.args, **self.kwargs)
+				elif len(self.args) > 0:
+					fun = functools.partial(self.fun, *self.args)
+				elif len(self.kwargs) > 0:
+					fun = functools.partial(self.fun, **self.kwargs)
+				else:
+					fun = self.fun
+
+				if HAS_PROGRESS and self.progress:
+					bar = Bar(expected_size = len(X))
+					result = pool.map_async(fun, X, chunksize = 1)
+					start_time = time.time()
+					tick = 0.1
+					while not result.ready():
+						bar.show(len(X) - result._number_left)	
+						time.sleep(tick - ((time.time() - start_time) % tick ))
+					bar.show(len(X))
+					bar.done()
+					output = result.get()
+				else:
+					output = pool.map(fun, X)
 		
 			pool.close()
 			pool.join()
@@ -170,23 +241,34 @@ class SimulationRunner():
 			self.run = self._run_loop
 			self.backend = 'loop'
 			return self.run(X)
-			
+		
 	def _run_celery(self, X):
 		X, M, m = process_inputs(X)
+		if self.units == 'normalized':
+			X = self.domain.unnormalize(X)
 		# store the function
-		marshal_func = marshal.dumps(self.fun.func_code)
-		results = [celery_runner.delay(x, marshal_func) for x in X]
+		#marshal_func = marshal.dumps(self.fun.func_code)
+		marshal_func = dill.dumps(self.fun)
+		results = [celery_runner.delay(x, marshal_func, self.args, self.kwargs) for x in X]
 
 		# Time between checking for results
 		tick = 0.1
 		start_time = time.time()
+		if HAS_PROGRESS and self.progress:
+			bar = Bar(expected_size = len(results))
 		while True:
 			# Check if everyone is done
 			status = [res.ready() for res in results]
+			if HAS_PROGRESS and self.progress:
+				bar.show(np.sum(status))
+
 			if all(status):
 				break
 			else:
 				time.sleep(tick - ((time.time() - start_time) % tick ))
+
+		if HAS_PROGRESS and self.progress:
+			bar = bar.done()
 
 		output = []
 		for res in results:

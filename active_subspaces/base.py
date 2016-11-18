@@ -5,10 +5,11 @@ from utils.misc import process_inputs_outputs, process_inputs
 from utils.simrunners import SimulationRunner, SimulationGradientRunner
 from utils.plotters import eigenvalues, subspace_errors, eigenvectors, sufficient_summary
 try:
-	from utils.celery_runner import celery, celery_runner
-except:
+	from utils.celery_runner import celery_runner, celery
+except Exception as e:
+	print e
 	pass
-from utils.est_noise import estimate_noise
+from utils.est_noise import estimate_noise, estimate_stepsize, estimate_second_derivative, ecnoise
 from response_surfaces import ActiveSubspaceResponseSurface
 from integrals import integrate, av_integrate
 from optimizers import minimize

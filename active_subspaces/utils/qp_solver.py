@@ -84,7 +84,7 @@ class QPSolver():
         else:
             raise ValueError('QP solver {} not available'.format(self.solver))
 
-    def linear_program_ineq(self, c, A, b):
+    def linear_program_ineq(self, c, A, b, lb = None, ub = None):
         """Solves an inequality constrained linear program.
 
         This method returns the minimizer of the following linear program.
@@ -109,17 +109,22 @@ class QPSolver():
             m-by-1 matrix that is the minimizer of the linear program
         
         """
+        if lb is None:
+            lb = -np.inf * np.ones(A.shape[1])
+        if ub is None:
+            ub = np.inf * np.ones(A.shape[1])
+
         if self.solver == solver_SCIPY:
-            return _scipy_linear_program_ineq(c, A, b)
+            return _scipy_linear_program_ineq(c, A, b, lb = lb, ub = ub)
         elif self.solver == solver_GUROBI:
-            return _gurobi_linear_program_ineq(c, A, b)
+            return _gurobi_linear_program_ineq(c, A, b, lb = lb, ub = ub )
         else:
             raise ValueError('QP solver {} not available'.format(self.solver))
 
     def quadratic_program_bnd(self, c, Q, lb, ub):
         """Solves a quadratic program with variable bounds.
 
-	This method returns the minimizer of the following linear program.
+    This method returns the minimizer of the following linear program.
 
         minimize  c^T x + x^T Q x
         subject to  lb <= x <= ub
@@ -206,15 +211,19 @@ def _scipy_linear_program_eq(c, A, b, lb, ub):
         raise Exception('Scipy did not solve the LP. Blame Scipy.')
         return None
 
-def _scipy_linear_program_ineq(c, A, b):
+def _scipy_linear_program_ineq(c, A, b, lb, ub):
 
     c = c.reshape((c.size,))
     b = b.reshape((b.size,))
 
     # make unbounded bounds
     bounds = []
-    for i in range(c.size):
-        bounds.append((None, None))
+    for lb_, ub_ in zip(lb, ub):
+        if not np.isfinite(lb_):
+            lb_ = None
+        if not np.isfinite(ub_):
+            ub_ = None
+        bounds.append((lb_, ub_))
 
     A_ub, b_ub = -A, -b
     res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, options={"disp": False})
@@ -328,17 +337,25 @@ def _gurobi_linear_program_eq(c, A, b, lb, ub):
         return None
 
 
-def _gurobi_linear_program_ineq(c, A, b):
-
+def _gurobi_linear_program_ineq(c, A, b, lb, ub):
+    b = b.flatten()
     m,n = A.shape
     model = gpy.Model()
     model.setParam('OutputFlag', 0)
+    model.setParam('NumericFocus', 3)	# improve handeling of numerical instabilities
 
     # Add variables to model
     vars = []
     for j in range(n):
-        vars.append(model.addVar(lb=-gpy.GRB.INFINITY,
-                    ub=gpy.GRB.INFINITY, vtype=gpy.GRB.CONTINUOUS))
+        if np.isfinite(lb[j]):
+            lb_ = lb[j]
+        else:
+            lb_ = -gpy.GRB.INFINITY
+        if np.isfinite(ub[j]):
+            ub_ = ub[j]
+        else:
+            ub_ = gpy.GRB.INFINITY
+        vars.append(model.addVar(lb=lb_, ub=ub_, vtype=gpy.GRB.CONTINUOUS))
     model.update()
 
     # Populate linear constraints
@@ -346,7 +363,7 @@ def _gurobi_linear_program_ineq(c, A, b):
         expr = gpy.LinExpr()
         for j in range(n):
             expr += A[i,j]*vars[j]
-        model.addConstr(expr, gpy.GRB.GREATER_EQUAL, b[i,0])
+        model.addConstr(expr, gpy.GRB.GREATER_EQUAL, b[i])
 
     # Populate objective
     obj = gpy.LinExpr()
