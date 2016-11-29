@@ -128,20 +128,25 @@ class LinIneqDomain(Domain):
 		#np.savetxt('A.txt', self.A, fmt = '%3g')
 		#np.savetxt('b.txt', self.b, fmt = '%3g')
 		
-		# get an initial feasible point using the Chebyshev center. 
-		normA = np.sqrt( np.sum( np.power(self.A, 2), axis=1 ) ).reshape((m, 1))
-		AA = np.hstack(( self.A, normA ))
-		c = np.zeros((n+1, 1))
-		c[-1] = -1.0
+		try:
+			# get an initial feasible point using the Chebyshev center. 
+			normA = np.sqrt( np.sum( np.power(self.A, 2), axis=1 ) ).reshape((m, 1))
+			AA = np.hstack(( self.A, normA ))
+			c = np.zeros((n+1, 1))
+			c[-1] = -1.0
 
-		qps = QPSolver()
-		zc = qps.linear_program_ineq(c, -AA, -np.copy(self.b), lb = np.hstack([self.lb,0.]), ub = np.hstack([self.ub, np.inf]))
-		
-		self.center = zc[:-1].reshape((n,))
-		self.only_bounds = np.array([np.linalg.norm(self.A[:,i]) < 1e-10 and np.isfinite(self.lb[i]) and np.isfinite(self.ub[i]) for i in range(n)])
-		self.center[self.only_bounds] = (self.lb[self.only_bounds] + self.ub[self.only_bounds])/2.
-		
-		self.z0 = np.copy(self.center[~self.only_bounds])
+			qps = QPSolver()
+			zc = qps.linear_program_ineq(c, -AA, -np.copy(self.b), lb = np.hstack([self.lb,0.]), ub = np.hstack([self.ub, np.inf]))
+			self.center = zc[:-1].reshape((n,))
+			
+			self.only_bounds = np.array([np.linalg.norm(self.A[:,i]) < 1e-10 and np.isfinite(self.lb[i]) and np.isfinite(self.ub[i]) for i in range(n)])
+			self.center[self.only_bounds] = (self.lb[self.only_bounds] + self.ub[self.only_bounds])/2.
+			
+			self.z0 = np.copy(self.center[~self.only_bounds])
+		except:
+			self.center = None
+			# TODO: Warning
+
 				
 	def isinside(self, x):
 		return np.all(np.dot(self.A, x) <= self.b) and np.all(self.lb <= x) and np.all(x <= self.ub)	
@@ -150,6 +155,10 @@ class LinIneqDomain(Domain):
 
 		A = self.A[:,~self.only_bounds]
 		m, n = A.shape
+
+		if self.center is None:
+			# Cannot use hit and run without centroid
+			raise NotImplementedError
 
 		maxiter = 500
 
