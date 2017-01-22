@@ -3,7 +3,12 @@ active subspaces."""
 import numpy as np
 from utils.misc import process_inputs_outputs, process_inputs
 from utils.simrunners import SimulationRunner, SimulationGradientRunner
-from utils.plotters import eigenvalues, subspace_errors, eigenvectors, sufficient_summary
+try:
+	from utils.plotters import eigenvalues, subspace_errors, eigenvectors, sufficient_summary
+except Exception as e:
+	print e
+	pass
+
 try:
 	from utils.celery_runner import celery_runner, celery
 except Exception as e:

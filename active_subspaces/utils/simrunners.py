@@ -27,7 +27,13 @@ try:
 	HAS_PROGRESS = True
 except:
 	HAS_PROGRESS = False
-					
+				
+try: 
+	from rq import Queue
+	from redis import Redis
+	HAS_RQ = True
+except:
+	HAS_RQ = False
 
 
 class SimulationRunner():
@@ -74,7 +80,8 @@ class SimulationRunner():
 	"""
 
 	def __init__(self, fun, backend = None, nproc = None, domain = None,
-		progress = False, units = 'application', args = None, kwargs = None):
+		progress = False, units = 'application', args = None, kwargs = None,
+		path = None, save_file = None, tic = 1., **additional_args):
 		"""Initialize a SimulationRunner.
 
 		Parameters
@@ -84,18 +91,29 @@ class SimulationRunner():
 			parameters, given as an ndarray. This function returns the quantity 
 			of interest from the model. Often, this function is a wrapper to a 
 			larger simulation code.
+
+		paths: list of paths
+			Specificies the location of python scripts to be run so that celery 
+			knows where to look.  This defaults to the current directory when the 
+			python script was called.
 		"""
 		if not hasattr(fun, '__call__'):
 			raise TypeError('fun should be a callable function.')
 
+		if path is None:
+			import os
+			path = [os.getcwd()]
+		self.path = path
 		self.fun = fun
-
+		self.save_file = save_file
+		self.tic = tic
+		self.additional_args = additional_args
 		# Default backend
 		if backend is None:
 			backend = 'loop'
 
 		# Check the user has specified a valid backend
-		if backend not in ['loop', 'multiprocessing', 'celery']:
+		if backend not in ['loop', 'multiprocessing', 'celery', 'rq']:
 			raise TypeError('Invalid backend chosen')
 
 		# Check if the backend selected is avalible
@@ -105,6 +123,9 @@ class SimulationRunner():
 		elif backend == 'celery' and HAS_CELERY is False:
 			backend = 'loop'
 			warnings.warn('celery not avalible, defaulting to "loop" backend')
+		elif backend == 'rq' and HAS_RQ is False:
+			backend = 'loop'
+			warnings.warn('rq not avalible, defaulting to "loop" backend')
 
 		self.backend = backend
 
@@ -118,13 +139,15 @@ class SimulationRunner():
 			self.run = self._run_multiprocessing
 		elif backend == 'celery':
 			self.run = self._run_celery
+		elif backend == 'rq':
+			self.run = self._run_rq
 
 		self.__call__ = self.run
 
 		# Setup the domain options
 		self.domain = domain
 	
-		self.progress = progress
+		self.progress = progress and HAS_PROGRESS
 		self.units = units
 		if self.domain is None:
 			self.isinside = lambda x: True
@@ -152,13 +175,16 @@ class SimulationRunner():
 		for i, out in enumerate(output):
 			# Find the dimenison of the output
 			if n_output is None and out is not None:
-				out = np.array(out).flatten()
-				n_output = out.shape[0]
-				F = np.zeros((M,n_output), dtype = out.dtype)
+				try:
+					out = np.array(out).flatten()
+					n_output = out.shape[0]
+					F = np.zeros((M,n_output), dtype = out.dtype)
+				except:
+					pass
 			if n_output is not None:
-				if out is not None:
+				try:
 					F[i] = np.array(out).flatten()
-				else: 
+				except: 
 					F[i] = np.nan
 
 		# If no evalution was successful
@@ -252,7 +278,6 @@ class SimulationRunner():
 		results = [celery_runner.delay(x, marshal_func, self.args, self.kwargs) for x in X]
 
 		# Time between checking for results
-		tick = 0.1
 		start_time = time.time()
 		if HAS_PROGRESS and self.progress:
 			bar = Bar(expected_size = len(results))
@@ -265,19 +290,70 @@ class SimulationRunner():
 			if all(status):
 				break
 			else:
-				time.sleep(tick - ((time.time() - start_time) % tick ))
+				time.sleep(self.tic - ((time.time() - start_time) % self.tic ))
 
 		if HAS_PROGRESS and self.progress:
 			bar = bar.done()
 
 		output = []
-		for res in results:
+		for i, res in enumerate(results):
 			try:
 				output.append(res.get())
-			except:
+			except Exception as e:
+				print "result ", i, 'failed with exception', e
 				output.append(None)
 
 		return self._format_output(output)
+	
+	def _run_rq(self, X):
+		X, M, m = process_inputs(X)
+		if self.units == 'normalized':
+			X = self.domain.unnormalize(X)
+		# store the function
+		#marshal_func = marshal.dumps(self.fun.func_code)
+		marshal_func = dill.dumps(self.fun)
+
+		redis_conn = Redis(**self.additional_args)
+		q = Queue(connection = redis_conn)
+
+
+		jobs = [q.enqueue_call(celery_runner, args = [x, marshal_func, self.args, self.kwargs], ttl = 86400) for x in X]
+	
+		if self.progress:
+			bar = Bar(expected_size = len(jobs))
+		
+		done = False
+		start_time = time.time()
+		outputs = len(jobs)*[ None ]
+		while True:
+			#status = [ job.is_finished or job.is_failed for job in jobs]
+			#if self.progress:
+			#	bar.show(np.sum(status))
+			
+			# store outputs
+			# We need to do this at every iteration as the results are flushed by default after 500 seconds
+			for i, job in enumerate(jobs):
+				if outputs[i] is None:
+					outputs[i] = job.result
+
+			number_done = 0
+			for out in outputs:
+				if out is not None:
+					number_done += 1
+			bar.show(number_done)	
+
+			if self.save_file is not None:
+				X = self._format_output(outputs)
+				np.savetxt(self.save_file, X)
+	
+			if number_done == len(jobs):
+				break
+			time.sleep(self.tic - ((time.time() - start_time) % self.tic ))
+
+		if HAS_PROGRESS and self.progress:
+			bar = bar.done()
+
+		return self._format_output(outputs)
 		
 
 def SimulationGradientRunner(*args, **kwargs):
