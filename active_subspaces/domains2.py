@@ -356,19 +356,18 @@ class LinIneqDomain(Domain):
 			self.ub = np.inf * np.ones(n)
 
 		m, n = self.A.shape
+		
 		assert n == self.lb.shape[0]
 		assert n == self.ub.shape[0]
-	
-		self.only_bounds = np.array([np.linalg.norm(self.A[:,i]) < 1e-10 and np.isfinite(self.lb[i]) and np.isfinite(self.ub[i]) for i in range(n)])
 
-
+				
 		if center is None:
 			# get an initial feasible point using the Chebyshev center. 
 			normA = np.sqrt( np.sum( np.power(self.A, 2), axis=1 ) ).reshape((m, 1))
 			AA = np.hstack(( self.A, normA ))
 			c = np.zeros((n+1, 1))
 			c[-1] = -1.0
-
+			
 			qps = QPSolver()
 			zc = qps.linear_program_ineq(c, -AA, -np.copy(self.b), lb = np.hstack([self.lb,0.]), ub = np.hstack([self.ub, np.inf]))
 			center = zc[:-1].reshape((n,))
