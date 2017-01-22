@@ -2,21 +2,21 @@
 
 import numpy as np
 from copy import deepcopy
-from utils.doc_inherit import doc_inherit
-from utils.qp_solver import QPSolver
+#from utils.doc_inherit import doc_inherit
+#from utils.qp_solver import QPSolver
 
 
 
 class Domain(object):
 	""" Abstract base class for input domain
 	"""	
-	def sample(self, x = None):
+	def sample(self, draw = 1):
 		""" Generate a random sample from the domain
 		
 		Parameters
 		----------
-		x : None or np.ndarray(m)
-			Sample points x that match every not NaN entry of x
+		draw : positive integer
+			Number of sample points to draw
 		"""
 		raise NotImplementedError
 		
@@ -46,12 +46,16 @@ class Domain(object):
 		raise NotImplementedError
 
 	def normalize(self, x):
+		""" Given a point in the application space, convert it to normalized units
+		"""
 		raise NotImplementedError
 	
 	def unnormalize(self, x):
 		raise NotImplementedError
 
 	def __add__(self, other):
+		""" Combine two domains
+		"""
 		assert isinstance(other, Domain)
 		if isinstance(other, ComboDomain):
 			ret = deepcopy(other)
@@ -62,6 +66,8 @@ class Domain(object):
 		return ret
 	
 	def __radd__(self, other):
+		""" Combine two domains
+		"""
 		assert isinstance(other, Domain)
 		if isinstance(other, ComboDomain):
 			ret = deepcopy(other)
@@ -73,6 +79,8 @@ class Domain(object):
 
 
 class ComboDomain(Domain):
+	""" Holds multiple domains together
+	"""
 	def __init__(self, domains):
 		self.domains = deepcopy(domains)
 
@@ -95,22 +103,25 @@ class ComboDomain(Domain):
 			ret.domains.insert(0,deepcopy(other))
 		return ret
 
-	def _split(self, x):
+	def _split(self, X):
+		original_dim = len(X.shape)
 		start = 0
 		stop = 0
-		x_vec = []
+		X_vec = []
 		for dom in self.domains:
 			stop += len(dom)
 			#print start, stop
-			x_vec.append(x[start:stop])
+			X_vec.append(X[:,start:stop])
 			start = stop
-		return x_vec
+		if original_dim == 1:
+			X_vec = [x.flatten() for x in X_vec]
+		return X_vec
 
 
-	def sample(self):
+	def sample(self, draw = 1):
 		x = []
 		for dom in self.domains:
-			x.append(dom.sample())
+			x.append(dom.sample(draw = draw))
 		return np.hstack(x)
 
 	def isinside(self, x):
@@ -128,32 +139,28 @@ class ComboDomain(Domain):
 		alpha = [dom.extent(xx, pp) for dom, xx, pp in zip(self.domains, self._split(x), self._split(p))]
 		return min(alpha)
 
-	def normalize(self, x):
-		y = []
-		start = 0
-		stop = 0
-		for dom in self.domains:
-			stop += len(dom)
-			y.append(dom.normalize(x[start:stop]))
-			start = stop
-		return np.hstack(y)	
+	def normalize(self, X):
+		original_dim = len(X.shape)
+		X = np.atleast_2d(X)
+		X_norm = np.hstack([dom.normalize(x) for dom, x in zip(self.domains, self._split(X))])
+		if original_dim == 1:
+			X_norm = X_norm.flatten()
+		return X_norm
 
-	def unnormalize(self, x):
-		y = []
-		start = 0
-		stop = 0
-		for dom in self.domains:
-			stop += len(dom)
-			y.append(dom.unnormalize(x[start:stop]))
-			start = stop
-		return np.hstack(y)	
+	def unnormalize(self, X_norm):
+		original_dim = len(X_norm.shape)
+		X_norm = np.atleast_2d(X_norm)
+		X = np.hstack([dom.unnormalize(x) for dom, x in zip(self.domains, self._split(X_norm))])
+		if original_dim == 1:
+			X = X.flatten()
+		return X
 
 	def __len__(self):
 		return sum([len(dom) for dom in self.domains])
 
 class BoxDomain(Domain):
 	
-	def __init__(self, lb, ub, repeat = 1):
+	def __init__(self, lb, ub):
 		"""Uniform Sampling on a Box
 		repeat : if scalar domain, 
 		"""
@@ -163,29 +170,31 @@ class BoxDomain(Domain):
 
 		self.lb = lb
 		self.ub = ub
-		if repeat > 1:
-			assert lb.shape[0] == 1, "Can only repeat with one dimensional domains" 
-		self.repeat = repeat
+		#if repeat > 1:
+		#	assert lb.shape[0] == 1, "Can only repeat with one dimensional domains" 
 
 	def __len__(self):
-		return self.lb.shape[0]*self.repeat
+		return self.lb.shape[0]
 
 	#@doc_inherit	
-	def sample(self, x = None):
+	def sample(self, draw = 1):
 
-		x_sample = np.random.uniform(self.lb, self.ub)
-		if x is not None:
-			# Replace those points 
-			I = np.isnan(x)
-			x_sample[I] = x[I]
-		return np.repeat(x_sample, self.repeat)
+		x_sample = np.random.uniform(self.lb, self.ub, size = (draw, self.lb.shape[0]))
+		#if x is not None:
+		#	# Replace those points 
+		#	I = np.isnan(x)
+		#	x_sample[I] = x[I]
+		if draw == 1:
+			return x_sample.flatten()
+		return x_sample
+		#return np.repeat(x_sample, self.repeat)
 
 	#@doc_inherit	
 	def isinside(self, x):
 		if len(x.shape) == 1:
-			if self.repeat > 1:
-				if np.any(x[0] != x):
-					return False
+			#if self.repeat > 1:
+			#	if np.any(x[0] != x):
+			#		return False
 			if np.any(x < self.lb) or np.any(x > self.ub):
 				return False
 			return True
@@ -197,18 +206,33 @@ class BoxDomain(Domain):
 		"""
 		Return points shifted and scaled to [-1,1]^m.
 		"""
-		lb = self.lb.reshape((1, lb.shape[0]))
-		ub = self.ub.reshape((1, ub.shape[0]))
-		return 2.0 * (X - lb) / (ub - lb) - 1.0
+		original_dim = len(X.shape)
+		X = np.atleast_2d(X)
+	
+	
+		lb = self.lb.reshape(1, -1)
+		ub = self.ub.reshape(1, -1)
+		norm = 2.0 * (X - lb) / (ub - lb) - 1.0
+		if original_dim == 1:
+			return norm.flatten()
+		else:
+			return norm
 
 	#@doc_inherit	
 	def unnormalize(self, X):
 		"""
 		Return points shifted and scaled to (lb, ub).
 		"""
-		lb = self.lb.reshape((1, lb.shape[0]))
-		ub = self.ub.reshape((1, ub.shape[0]))
-		return (ub - lb) * (X + 1.0) / 2.0 + lb
+		original_dim = len(X.shape)
+		X = np.atleast_2d(X)
+		X.reshape(-1, self.lb.shape[0])
+		lb = self.lb.reshape(1, -1)
+		ub = self.ub.reshape(1, -1)
+		app = (ub - lb) * (X + 1.0) / 2.0 + lb
+		if original_dim == 1:
+			return app.flatten()
+		else:
+			return app
 
 	def extent(self, x, p):
 		alpha = float('inf')
@@ -266,8 +290,11 @@ class NormalDomain(Domain):
 			return (self.mean.reshape(-1,1) + np.dot(np.diag(np.sqrt(self.ew)), np.dot(self.ev.T, y.T))).T
 		raise NotImplementedError
 
-	def sample(self):
-		return np.random.multivariate_normal(self.mean, self.cov)
+	def sample(self, draw = 1):
+		x =  np.random.multivariate_normal(self.mean, self.cov, size = (draw, self.mean.shape[0]))
+		if draw == 1:
+			return x.flatten()
+		return x
 	
 	def __len__(self):
 		return self.mean.shape[0]
@@ -314,13 +341,16 @@ class LogNormalDomain(Domain):
 			return np.exp(self.mean.reshape(-1,1) + np.dot(np.diag(np.sqrt(self.ew)), np.dot(self.ev.T, y.T))).T*self.scaling
 		raise NotImplementedError
 
-	def sample(self):
-		return np.exp(np.random.multivariate_normal(self.mean, self.cov))*self.scaling
+	def sample(self, draw = 1):
+		x = np.exp(np.random.multivariate_normal(self.mean, self.cov, size = (draw, self.mean.shape[0])))*self.scaling
+		if draw == 1:
+			return x.flatten()
+		return x
 
 	def __len__(self):
 		return self.mean.shape[0]
 
-class LinIneqDomain(Domain):
+class LinIneqDomain(BoxDomain, Domain):
 	"""Defines a domain specified by a linear inequality constraint
 
 	This defines a domain 
@@ -361,6 +391,7 @@ class LinIneqDomain(Domain):
 		assert n == self.lb.shape[0]
 		assert n == self.ub.shape[0]
 
+		self.only_bounds = np.array([np.linalg.norm(self.A[:,i]) < 1e-10 and np.isfinite(self.lb[i]) and np.isfinite(self.ub[i]) for i in range(n)])
 				
 		if center is None:
 			# get an initial feasible point using the Chebyshev center. 
@@ -381,6 +412,13 @@ class LinIneqDomain(Domain):
 
 		self.center = center	
 		self.z0 = np.copy(self.center)
+
+	
+		# Bind the normalization functions from BoxDomain
+		self.normalize = super(LinIneqDomain, self).normalize
+		self.unnormalize = super(LinIneqDomain, self).unnormalize
+
+
 
 	def __len__(self):
 		return self.center.shape[0]
@@ -412,12 +450,9 @@ class LinIneqDomain(Domain):
 		if np.any(p[self.ub == x] > 0):
 			alpha = 0	
 		return alpha
-	
-	def sample(self, no_recurse = False):
 
-		#A = self.A[:,~self.only_bounds]
-		#m, n = A.shape
 
+	def _sample(self, no_recurse = False):
 		maxiter = 500
 		bad_dir = True
 		for it in range(maxiter):
@@ -431,7 +466,7 @@ class LinIneqDomain(Domain):
 
 		if bad_dir and no_recurse ==  False:
 			self.z0 = np.copy(self.center)
-			return self.sample(no_recurse = True)
+			return self._sample(no_recurse = True)
 
 		if bad_dir == True and no_recurse == True:
 			raise Exception('could not find a good direction')
@@ -446,26 +481,14 @@ class LinIneqDomain(Domain):
 		z = np.copy(self.z0)
 		z[self.only_bounds] = np.random.uniform(self.lb[self.only_bounds], self.ub[self.only_bounds])	
 		return z
+	
+	def sample(self, draw = 1):
+		if draw == 1:
+			return self._sample()
+		else:
+			return np.array([self._sample() for i in range(draw)])
+
 
 
 	
-	def normalize(self, X):
-		"""
-		Return points shifted and scaled to [-1,1]^m.
-		"""
-		if len(X.shape) == 1:
-			X = X.reshape(1,-1)
-		lb = self.lb.reshape(1, -1)
-		ub = self.ub.reshape(1, -1)
-		return 2.0 * (X - lb) / (ub - lb) - 1.0
-
-	def unnormalize(self, X):
-		"""
-		Return points shifted and scaled to (lb, ub).
-		"""
-		if len(X.shape) == 1:
-			X = X.reshape(1, -1)
-		lb = self.lb.reshape(1, -1)
-		ub = self.ub.reshape(1, -1)
-		return (ub - lb) * (X + 1.0) / 2.0 + lb
 
