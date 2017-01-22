@@ -8,7 +8,8 @@ from utils.qp_solver import QPSolver
 
 
 class Domain(object):
-	
+	""" Abstract base class for input domain
+	"""	
 	def sample(self, x = None):
 		""" Generate a random sample from the domain
 		
